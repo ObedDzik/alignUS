@@ -8,7 +8,7 @@ chkpt_dir: /${oc.env:JOB_ID} #dummy
 model_type: medsam
 experiment_type: pnf
 
-histo_emb_dir: /home/obed/projects/aip-medilab/obed/medproj/medAI/projects/histopathology/radboud_gigaembeds
+histo_emb_dir: /project/6106383/shared/radboud_gigaembeds
 mri_emb_dir: /home/obed/projects/aip-medilab/shared/mri_only_embeddings_dino
 hist_csv: /project/aip-medilab/shared/metadata_usalign/clean_labels_with_cancer_pct.csv
 mri_csv: /project/aip-medilab/shared/picai/manifests/slices_manifest.csv

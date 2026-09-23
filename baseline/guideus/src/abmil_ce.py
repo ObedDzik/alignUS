@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Tuple
-from baseline.guideus.src.baseline_attention_reg import ACMILHead
+from src.baseline_attention_reg import ACMILHead
 
 class ABMILISUP(nn.Module):
     def __init__(

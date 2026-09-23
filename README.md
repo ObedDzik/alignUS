@@ -171,5 +171,11 @@ Configs are OmegaConf YAML with CLI dotlist overrides.
 
 ## Citation
 
-Preprint / under review — citation details to follow. In the meantime,
-please cite by name and link to this repository.
+```bibtex
+@article{dzikunu2026weakly,
+  title={Weakly Supervised Spatial Grounding for Discriminative Attention-Based Ultrasound-Histopathology Alignment in Prostate Cancer Grading},
+  author={Dzikunu, Obed Korshie and Willis, Emma and Abootorabi, Mohammad Mahdi and Harmanani, Mohamed and Guo, Zhuoxin and Luger, Ferdinand and Kinnaird, Adam and Wodlinger, Brian and Mousavi, Parvin and Abolmaesumi, Purang},
+  journal={arXiv preprint arXiv:2609.15150},
+  year={2026}
+}
+```

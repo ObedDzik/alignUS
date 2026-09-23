@@ -85,11 +85,9 @@ from medAI.modeling import *
 from medAI.utils.argparse import UpdateDictAction
 from medAI.utils.reproducibility import (get_all_rng_states,set_all_rng_states,set_global_seed,)
 from medAI.utils.accumulators import DataFrameCollector
+from clean_loss import build_loss
 from medAI.layers.masked_prediction_module import MaskedPredictionModule
-from baseline.guideus.src.loaders import check_grade_distribution #get_dataloaders
-# from projects.ggnus_align.nct_optimum_loader import get_dataloaders
-# from projects.ggnus_align.nct_trvl_op_ts import get_dataloaders
-from baseline.guideus.src.nct_optimum_loader_pnf import get_dataloaders
+from src.loaders import check_grade_distribution #get_dataloaders
 
 from medAI.engine.prostnfound.evaluator import (
     ProstNFoundEvaluator as Evaluator,
@@ -98,10 +96,9 @@ OmegaConf.register_new_resolver('getenv', os.getenv)
 from pathlib import Path
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, confusion_matrix, classification_report, roc_auc_score
-from baseline.guideus.src.get_dino_model import dinov3_vitl16
-from baseline.guideus.src.abmil_wrapper import NeedleABMILWrapper
+from src.get_dino_model import dinov3_vitl16
+from src.abmil_wrapper import NeedleABMILWrapper
 from sklearn.preprocessing import StandardScaler
-from baseline.guideus.src.loss_new import build_loss
 from medAI.layers.masked_prediction_module import MaskedPredictionModule
 
 import numpy as np
@@ -501,10 +498,6 @@ def run_train_epoch(args, model, loader, criterion, optimizer, scheduler, scaler
     niter = len(loader)
     patch_head = _get_patch_cancer_head(criterion, getattr(args, "propbce", False))
     global_step = epoch * niter
-    # Same core-level AUC evaluator projects/prostnfound/train.py tracks
-    # (val/auc) -- guideus's decoder ("cancer_logits") produces exactly the
-    # same fields this evaluator reads, so the metric is computed identically.
-    evaluator = Evaluator(**args.evaluator)
 
     for train_iter, data in enumerate(tqdm(loader, desc=desc)):
         if args.debug and train_iter > 10:
@@ -516,9 +509,6 @@ def run_train_epoch(args, model, loader, criterion, optimizer, scheduler, scaler
             if "cancer_logits" in data and torch.any(torch.isnan(data["cancer_logits"])):
                 logging.warning("NaNs in decoder logits")
             loss = criterion(data)
-
-        if "cancer_logits" in data:
-            evaluator(data)
 
         epoch_feats.append(data["image_feats_needle"].detach().float().cpu().numpy())
         epoch_labels.append(data["bucket_label"].detach().long().cpu().numpy())
@@ -556,8 +546,6 @@ def run_train_epoch(args, model, loader, criterion, optimizer, scheduler, scaler
 
     args._global_step = global_step
     recorder.flush()
-    decoder_metrics = evaluator.aggregate_metrics()
-    wandb.log({f"train/{k}": v for k, v in decoder_metrics.items() if np.isscalar(v)})
     X = np.concatenate(epoch_feats, axis=0) if epoch_feats else np.empty((0, 1))
     y = np.concatenate(epoch_labels, axis=0) if epoch_labels else np.empty((0,), dtype=np.int64)
     return X, y
@@ -579,9 +567,6 @@ def run_eval_epoch(args, model, loader, epoch, X_tr, y_tr, desc="val"):
     isup_logits, isup_labels = [], []
     meta = {k: [] for k in ("core_id", "patient_id", "center", "involvement",
                             "grade_group", "attn_entropy")}
-    # Same core-level evaluator projects/prostnfound/train.py uses for
-    # val/auc -- tracked_metric now reads this instead of the linear probe.
-    evaluator = Evaluator(**args.evaluator)
 
     for data in tqdm(loader, desc=desc):
         # captured BEFORE the forward pass: us_only mode zeroes positive_hist
@@ -590,9 +575,6 @@ def run_eval_epoch(args, model, loader, epoch, X_tr, y_tr, desc="val"):
 
         with torch.cuda.amp.autocast(enabled=args.use_amp):
             data = model(data)
-
-        if "cancer_logits" in data:
-            evaluator(data)
 
         feats.append(data["image_feats_needle"].detach().float().cpu().numpy())
         labels.append(data["bucket_label"].detach().long().cpu().numpy())
@@ -624,11 +606,6 @@ def run_eval_epoch(args, model, loader, epoch, X_tr, y_tr, desc="val"):
     save_emb = bool(embed_every) and (epoch % embed_every == 0 or epoch == args.epochs - 1)
 
     metrics = {"epoch": epoch, "global_step": getattr(args, "_global_step", epoch)}
-
-    # Core-level decoder metrics (auc, etc.) -- same evaluator/keys
-    # projects/prostnfound/train.py tracks as val/auc.
-    decoder_metrics = evaluator.aggregate_metrics()
-    metrics.update({f"{desc}/{k}": v for k, v in decoder_metrics.items() if np.isscalar(v)})
 
     # alignment metrics: returns histo_available=0 for pnf / us_only zeroed histo
     if H_val.shape[0] == X_val.shape[0] and X_val.shape[0] > 0 and "grade_group" in meta:
@@ -804,6 +781,10 @@ def main(cfg):
         model.load_state_dict(state["model"])
 
     criterion = build_loss(cfg)                   # noqa: F821
+    if cfg.experiment_type == 'pnf':
+        from baseline.guideus.src.nct_optimum_loader_pnf import get_dataloaders
+    else:
+        from src.nct_optimum_loader import get_dataloaders
     loaders = get_dataloaders(cfg.data, mode="train")   # noqa: F821
     train_loader, val_loader = loaders["train"], loaders["val"]
     optimizer, lr_scheduler = setup_optimizer(cfg, model, train_loader)   # noqa: F821
@@ -876,10 +857,7 @@ def main(cfg):
 if __name__ == "__main__":
     p = ArgumentParser(description="Train ProstNFound model")
     p.add_argument('--config', '-c', help='Path to config file (located in cfg/train/...)')
-    p.add_argument('options', nargs=argparse.REMAINDER, help='OmegaConf dotlist overrides, e.g. fold=1')
     args = p.parse_args()
     cfg = OmegaConf.load(args.config)
-    if args.options:
-        cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(args.options))
 
     main(cfg)

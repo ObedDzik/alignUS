@@ -1,7 +1,6 @@
 from abc import ABC, abstractmethod
 import argparse
 from dataclasses import dataclass, field
-import functools
 import json
 import os
 from typing import Literal
@@ -28,32 +27,17 @@ from medAI.datasets.nct2013.data_access import data_accessor
 from medAI.transforms.prostnfound_transform import ProstNFoundTransform
 from typing import List, Optional
 from collections import defaultdict
-from baseline.guideus.src.bmode_dataset import BModeDatasetV2
-from baseline.guideus.src.needle_trace_dataset_ttt import NeedleTraceImageFramesDataset
-from baseline.guideus.src.nct_optimum_dataset import MergedDataset
-from baseline.guideus.src.isup_stratify import GradeStratifiedSampler, GradeBalancedBatchSampler
+from src.bmode_dataset import BModeDatasetV2
+from src.needle_trace_dataset_ttt import NeedleTraceImageFramesDataset
+from src.nct_optimum_dataset import MergedDataset
+from src.isup_stratify import GradeStratifiedSampler, GradeBalancedBatchSampler
 
 
 
-def _optimum_adapter(item: dict, pu_extra_flip: bool = False) -> dict:
+def _optimum_adapter(item: dict) -> dict:
     """
     Normalize a NeedleTraceImageFramesDataset item to the shared schema.
     Works whether the sub-dataset returns PIL or numpy (out_fmt either way).
-
-    Note: this adapter renames "image" -> "bmode" itself, so by the time
-    ProstNFoundTransform._coerce_input sees the output, 'image' is no
-    longer a key -- its own `if 'image' in item` check (which would
-    otherwise route through _ProstNFoundDatasetAdapterOptimum's
-    "probe_top" flip, and that class's own optional PU counter-flip)
-    never fires here. This adapter is therefore the only place a PU
-    orientation fix can be applied for this loader -- `pu_extra_flip`
-    below is NOT the same mechanism as ProstNFoundTransform.pu_extra_flip
-    (that one is unreachable from this code path). Un-flipped UA/OL stays
-    exactly as before (this project's own established, already-run
-    convention) -- only PU gets a single corrective flip when enabled,
-    matching the real orientation difference confirmed via needle-mask
-    geometry (see projects/prostnfound/orientation_check/ and
-    DATASET.md's "Orientation/flip convention").
     """
     import numpy as np
 
@@ -76,12 +60,6 @@ def _optimum_adapter(item: dict, pu_extra_flip: bool = False) -> dict:
         prostate_mask = np.ones_like(needle_mask, dtype=np.uint8)
 
     info = item.get("info", {})
-    center = info.get("center", "Unknown")
-
-    if pu_extra_flip and center == "PU":
-        image = np.flipud(image).copy()
-        needle_mask = np.flipud(needle_mask).copy()
-        prostate_mask = np.flipud(prostate_mask).copy()
 
     return {
         "bmode": image,
@@ -93,7 +71,7 @@ def _optimum_adapter(item: dict, pu_extra_flip: bool = False) -> dict:
         "age": float(info.get("age", 0.0)),
         "approx_psa_density": float(info.get("approx_psa_density", 0.0)),
         "family_history": info.get("family_history", float("nan")),
-        "center": center,
+        "center": info.get("center", "Unknown"),
         "all_cores_benign": info.get("all_cores_benign", False),
         "core_id": info.get("cine_id", "Unknown"),
         "patient_id": info.get("case", "Unknown"),
@@ -192,24 +170,10 @@ def get_dataloaders(args, mode: Literal["train", "test", "heatmap"] = "train"):
     # ------------------------------------------------------------------
     # Build center-1 sub-datasets (BModeDatasetV2) — no adapter needed
     # ------------------------------------------------------------------
-    # Stage gating (added for the NCT-pretrain -> OPTIMUM-finetune two-stage
-    # recipe, matching projects/prostnfound's convention): each of the three
-    # underlying core sources (center 1 = NCT2013, center 2 = the legacy
-    # single-frame UA_annotated_needles export, center 3 = the canonical
-    # UA_OL_PU_annotated_needles_multiframe export) can be independently
-    # switched off. Default True/True/True reproduces the original
-    # combined-everything behavior byte-for-byte for any existing caller.
-    include_nct = bool(args.get("include_nct", True))
-    include_optimum_c23 = bool(args.get("include_optimum_c23", True))
-    include_optimum_c3 = bool(args.get("include_optimum_c3", True))
-
-    if include_nct:
-        train_cores_c1, val_cores_c1, test_cores_c1 = select_cohort_from_args(args)
-    else:
-        train_cores_c1, val_cores_c1, test_cores_c1 = [], [], []
+    train_cores_c1, val_cores_c1, test_cores_c1 = select_cohort_from_args(args)
 
     # Optionally subsample training cores
-    if include_nct and args.limit_train_data is not None:
+    if args.limit_train_data is not None:
         from sklearn.model_selection import StratifiedShuffleSplit
         centers = [c.split("-")[0] for c in train_cores_c1]
         sss = StratifiedShuffleSplit(
@@ -235,82 +199,49 @@ def get_dataloaders(args, mode: Literal["train", "test", "heatmap"] = "train"):
     # ------------------------------------------------------------------
     # Build center-2 and center-3 sub-datasets (NeedleTraceImageFrames)
     # ------------------------------------------------------------------
-    # `optimum_centers` (list, e.g. [UA, OL]) supersedes the old single-string
-    # `optimum_center` -- falls back to [args.optimum_center] so any existing
-    # cfg using the old field keeps working unchanged.
-    optimum_centers = args.get("optimum_centers", None)
-    if not optimum_centers:
-        optimum_centers = [args.optimum_center]
-
-    # PU (transperineal) added to center-3's TRAIN split only -- val stays
-    # exactly the optimum_centers-only split above, unchanged. Mirrors
-    # projects/prostnfound/src/loaders_optimum.py's include_pu_in_train,
-    # adapted to this loader's own from-scratch KFold (no precomputed
-    # splits.json here) -- PU cases get their own independent KFold split
-    # (same n_folds/seed) and only that fold's PU "train" role is added,
-    # so each fold sees a different ~80% subset of PU rather than every
-    # PU case every fold.
-    include_pu_in_train = bool(args.get("include_pu_in_train", False))
-    pu_extra_flip = bool(args.get("pu_extra_flip", False))
-
-    train_cases_c23, val_cases_c23, train_cases_c3, val_cases_c3 = [], [], [], []
-
     if args.cohort_selection_mode == "kfold":
-        if include_optimum_c23:
-            all_cases_c23 = [
-                p for p in os.listdir(args.root_dir_c23)
-                if os.path.isdir(os.path.join(args.root_dir_c23, p))
-            ]
-            skf = KFold(n_splits=args.n_folds, shuffle=True,
-                        random_state=args.train_subsample_seed)
-            for fold, (tr_idx, va_idx) in enumerate(skf.split(all_cases_c23)):
-                if fold == args.fold:
-                    train_cases_c23 = [all_cases_c23[i] for i in tr_idx]
-                    val_cases_c23   = [all_cases_c23[i] for i in va_idx]
-                    break
+        all_cases_c23 = [
+            p for p in os.listdir(args.root_dir_c23)
+            if os.path.isdir(os.path.join(args.root_dir_c23, p))
+        ]
 
-        if include_optimum_c3:
-            all_cases_c3 = [
-                p for p in os.listdir(args.root_dir_c3)
-                if os.path.isdir(os.path.join(args.root_dir_c3, p)) and p[:2] in optimum_centers
-            ]
-            skf = KFold(n_splits=args.n_folds, shuffle=True,
-                        random_state=args.train_subsample_seed)
-            for fold, (tr_idx, va_idx) in enumerate(skf.split(all_cases_c3)):
-                if fold == args.fold:
-                    train_cases_c3 = [all_cases_c3[i] for i in tr_idx]
-                    val_cases_c3   = [all_cases_c3[i] for i in va_idx]
-                    break
+        all_cases_c3 = [
+            p for p in os.listdir(args.root_dir_c3)
+            if os.path.isdir(os.path.join(args.root_dir_c3, p)) and p[:2]==args.optimum_center
+        ]
 
-            if include_pu_in_train:
-                all_cases_pu = [
-                    p for p in os.listdir(args.root_dir_c3)
-                    if os.path.isdir(os.path.join(args.root_dir_c3, p)) and p[:2] == "PU"
-                ]
-                skf_pu = KFold(n_splits=args.n_folds, shuffle=True,
-                                random_state=args.train_subsample_seed)
-                for fold, (tr_idx, va_idx) in enumerate(skf_pu.split(all_cases_pu)):
-                    if fold == args.fold:
-                        train_cases_c3 = train_cases_c3 + [all_cases_pu[i] for i in tr_idx]
-                        break
+        skf = KFold(n_splits=args.n_folds, shuffle=True,
+                    random_state=args.train_subsample_seed)
+        train_cases_c23, val_cases_c23 = [], []
+        for fold, (tr_idx, va_idx) in enumerate(skf.split(all_cases_c23)):
+            if fold == args.fold:
+                train_cases_c23 = [all_cases_c23[i] for i in tr_idx]
+                val_cases_c23   = [all_cases_c23[i] for i in va_idx]
+                break
+        train_cases_c3, val_cases_c3 = [], []
+        for fold, (tr_idx, va_idx) in enumerate(skf.split(all_cases_c3)):
+            if fold == args.fold:
+                train_cases_c3 = [all_cases_c3[i] for i in tr_idx]
+                val_cases_c3   = [all_cases_c3[i] for i in va_idx]
+                break
 
     elif args.cohort_selection_mode == "splits_file":
-        if include_optimum_c23:
-            with open(args.splits_file) as f:
-                splits = json.load(f)
-            train_cases_c23 = splits.get("train", [])
-            val_cases_c23   = splits.get("val", [])
+        with open(args.splits_file) as f:
+            splits = json.load(f)
+        train_cases_c23 = splits.get("train", [])
+        val_cases_c23   = splits.get("val", [])
+        test_cases_c23  = splits.get("test", [])
 
     else:  # "train_val" or None — simple 80/20
-        if include_optimum_c23:
-            all_cases_c23 = [
-                p for p in os.listdir(args.root_dir_c23)
-                if os.path.isdir(os.path.join(args.root_dir_c23, p))
-            ]
-            train_cases_c23, val_cases_c23 = train_test_split(
-                all_cases_c23, test_size=0.2,
-                random_state=args.train_subsample_seed
-            )
+        all_cases_c23 = [
+            p for p in os.listdir(args.root_dir_c23)
+            if os.path.isdir(os.path.join(args.root_dir_c23, p))
+        ]
+        train_cases_c23, val_cases_c23 = train_test_split(
+            all_cases_c23, test_size=0.2,
+            random_state=args.train_subsample_seed
+        )
+        test_cases_c23 = []
 
     needle_mask_fname = "needle_mask.png" if mode != "heatmap" else "needle_mask_full.png"
 
@@ -343,31 +274,21 @@ def get_dataloaders(args, mode: Literal["train", "test", "heatmap"] = "train"):
     #         **shared_sampler_kwargs,
     #     )
 
-    # NeedleTraceImageFramesDataset treats an empty case_ids list as "no
-    # filter" (loads every case under root_dir), NOT "load nothing" -- unlike
-    # BModeDatasetV2 (an empty core_ids list is explicitly filtered to zero
-    # cores). So disabled needle sources must be omitted from sub_datasets
-    # entirely, not passed an empty case list.
-    train_sub_datasets = [(make_bmode(train_cores_c1, frames=args.frames), None)]
-    val_sub_datasets = [(make_bmode(val_cores_c1, frames="first"), None)]
-    if include_optimum_c23:
-        train_sub_datasets.append((make_needle(train_cases_c23), _optimum_adapter))
-        val_sub_datasets.append((make_needle(val_cases_c23), _optimum_adapter))
-    if include_optimum_c3:
-        c3_train_adapter = (
-            functools.partial(_optimum_adapter, pu_extra_flip=pu_extra_flip)
-            if include_pu_in_train else _optimum_adapter
-        )
-        train_sub_datasets.append((make_needle(train_cases_c3, root=args.root_dir_c3), c3_train_adapter))
-        val_sub_datasets.append((make_needle(val_cases_c3, root=args.root_dir_c3), _optimum_adapter))
-
     train_dataset = MergedDataset(
-        sub_datasets=train_sub_datasets,
+        sub_datasets=[
+            (make_bmode(train_cores_c1, frames=args.frames), None),
+            (make_needle(train_cases_c23), _optimum_adapter),
+            (make_needle(train_cases_c3, root=args.root_dir_c3), _optimum_adapter),  # <-- add
+        ],
         transform=train_transform,
         **shared_sampler_kwargs,
     )
     val_dataset = MergedDataset(
-        sub_datasets=val_sub_datasets,
+        sub_datasets=[
+            (make_bmode(val_cores_c1, frames="first"), None),
+            (make_needle(val_cases_c23), _optimum_adapter),
+            (make_needle(val_cases_c3, root=args.root_dir_c3), _optimum_adapter),    # <-- add
+        ],
         transform=val_transform,
         **shared_sampler_kwargs,
     )
