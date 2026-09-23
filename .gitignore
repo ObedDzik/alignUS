@@ -19,8 +19,14 @@ baseline/guideus/results_paper_metrics.json
 *.key
 *secret*
 
-# not for the public repo — obed's explicit ask (2026-09-23)
-resources/
+# not for the public repo — obed's explicit ask (2026-09-23). resources/
+# otherwise holds patient/cohort-identifying split files (bk_core_splits.json,
+# bk_patient_splits.json, two tarek-SSL-project patient-list JSONs) that must
+# stay private, but G7.npy is a real runtime dependency (a plain grayscale
+# lookup table, no patient data -- medAI.datasets.nct2013.utils.apply_colormap
+# reads it on every B-mode image load) and is explicitly un-ignored below.
+resources/*
+!resources/G7.npy
 figures/
 debug.sh
 align_us.pdf
