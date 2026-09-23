@@ -1,0 +1,140 @@
+fold: 2
+weight: 0.2_H_0.8_M
+pr_train_mode: us_only
+train_mode: ${pr_train_mode}
+run_name: dino_us_only_${fold}
+base_dir: /scratch/obed
+chkpt_dir: /${oc.env:JOB_ID} #dummy
+model_type: dino
+# histo_emb_dir: /home/obed/projects/aip-medilab/shared/mahdi_histo_uni_embeds
+histo_emb_dir: /home/obed/projects/aip-medilab/obed/medproj/medAI/projects/histopathology/radboud_gigaembeds
+# histo_emb_dir: /home/obed/projects/aip-medilab/obed/medproj/medAI/projects/histopathology/karolinska_giga_embeddings
+mri_emb_dir: /home/obed/projects/aip-medilab/shared/mri_only_embeddings_dino
+hist_csv: /project/aip-medilab/shared/metadata_usalign/clean_labels_with_cancer_pct.csv
+mri_csv: /project/aip-medilab/shared/picai/manifests/slices_manifest.csv
+freeze_encoder: False
+restrict_test: False
+
+use_acmil: False
+acmil_mask_drop_prob: 0.0
+acmil_n_branches: 5
+supcon_only: False
+propbce: False
+loss_type: vsupcon
+loss_type_reg: null
+lambda_cross: 0.0
+lambda_within: 1.0
+lambda_mri: 0.0
+normalize: False
+use_mmd: False
+lambda_mmd: 0.0
+no_per_grade: 5
+
+lambda_aem: 0.1
+
+data_provider: radboud
+proj_dim: 768
+hidden_dim: 512
+input_dim: 1024
+
+lambda_supcon: 0.5    # weight of SupCon relative to MMD
+bank_size: 128
+neg_strength: 1.0
+domain_weight: 1.0
+test_tracked_metric: linear_probe/macro_auc
+test_save_best_weights: True
+
+data:
+  dataset: nct              # anything other than "optimum" uses BModeDatasetV2
+  root_dir_c23: /datasets/exactvu_pca/OPTIMUM/processed/UA_annotated_needles   # NeedleTrace root for train/val
+  root_dir_c3: /datasets/exactvu_pca/OPTIMUM/UA_OL_PU_annotated_needles_multiframe
+  fold: ${fold}
+  optimum_center: OL
+  n_folds: 5
+  test_center: null
+  exclude_benign_cores_from_positive_patients: true
+  involvement_threshold_pct: null
+  undersample_benign_ratio: null
+  cohort_selection_mode: kfold
+  # dataset: default
+  batch_size: 60
+  num_workers: 8
+  augmentations: translate
+  image_size: 512
+  first_downsample_size: null
+  mask_size: ${data.image_size}
+  limit_train_data: null
+  mean: [0, 0, 0] 
+  std: [1, 1, 1]
+  flip_ud: false
+  frames: first
+  crop_to_prostate: false
+  rf_as_bmode: false
+  include_rf: false
+  train_subsample_seed: 42   #42 
+  histo_emb_dir: ${histo_emb_dir}
+  mri_emb_dir: ${mri_emb_dir}
+  hist_csv: ${hist_csv}
+  mri_csv: ${mri_csv}
+  hist_data_provider: ${data_provider}
+  samples_per_grade: ${no_per_grade}
+
+model:
+  name: unetr_generic
+  backbone_cfg:
+    name: dinov3_backbone_wrapper_for_feature_maps_list #/data/scratch/users/obed/1818/eval/training_49999/teacher_checkpoint.pth
+    backbone_cfg:
+      name: dinov3_vitl16 #dinov3_backbone_from_checkpoint
+      # config_path: /data/scratch/users/obed/dinov3_ssl/1818/config.yaml #/home/obed/scratch/1471034/config.yaml
+      # checkpoint_path: /data/scratch/users/obed/dinov3_ssl/1818/eval/training_49999/teacher_checkpoint.pth #/home/obed/scratch/1471034/eval/training_37499/teacher_checkpoint.pth
+      pretrained: true
+  embedding_size: 1024
+  backbone_out_format: bchw
+  input_size: ${data.image_size}
+  output_size: ${data.image_size}
+  interaction_indices:
+  - 4
+  - 11
+  - 17
+  - 23
+loss: mil_prop_bce_entropy_reg
+pos_weight: 8.0
+treat_gg1_as_benign: false
+outside_prostate_penalty: false
+add_image_clf: true
+image_clf_mode: cspca
+add_image_clf_high_vs_low_grade: false
+optimizer: adamw
+lr: 1.0e-06
+encoder_lr: 1.0e-06
+warmup_lr: 0.00001
+cnn_lr: 1.0e-06
+warmup_epochs: 0
+wd: 0.0
+epochs: 50
+accumulate_grad_steps: 1
+cutoff_epoch: null
+run_test: True
+test_every_epoch: false
+run_val: true
+project: miccai2024_comparison
+seed: 30
+tracked_metric: linear_probe/macro_auc
+save_checkpoint_wandb: false
+torch_compile: true
+use_amp: true
+device: cuda
+checkpoint_dir: ${base_dir}/alignUS_propbce/${run_name}/${chkpt_dir} #${base_dir}/${chkpt_dir}
+model_checkpoint: null #/home/obed/scratch/ggnus_align/nct_opt_3way_0.2M_0.5H_0/3691219/best.pth
+debug: false
+save_best_weights: True
+evaluator:
+  log_images: true
+  log_images_every: 100
+
+wandb:
+  run_name: ${run_name}
+  project: alignUS_propbce
+  group: ${run_name}
+job_id: 0
+

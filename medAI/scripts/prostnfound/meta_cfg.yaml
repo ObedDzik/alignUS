@@ -1,0 +1,96 @@
+val_center: PMCC
+run_name: ${val_center}-meta_learn_test_ema
+base_dir: /scratch/obed
+output_dir: logs/meta_learn/center${val_center}
+chkpt_dir: ${base_dir}/${val_center}/${oc.env:CHECKPOINT}/${oc.env:JOB_ID}
+
+update_layers: last_n
+n_blocks: 4
+meta_iterations: 1000
+epochs: 35
+log_interval: 20
+meta_lr: 2e-3
+inner_lr: 5e-3
+inner_steps: 20
+mask_ratio: 0.6
+
+data:
+  n_folds: 5
+  exclude_benign_cores_from_positive_patients: true
+  involvement_threshold_pct: null
+  undersample_benign_ratio: null
+  dataset: default
+  batch_size: 4
+  num_workers: 8
+  train_subsample_seed: 42
+  augmentations: translate,random_crop
+  image_size: 512
+  first_downsample_size: null
+  mask_size: 512
+  limit_train_data: null
+  mean: [0.485, 0.456, 0.406]  # ← CHANGED
+  std: [0.229, 0.224, 0.225] # ← CHANGED
+  flip_ud: false
+  frames: first
+  crop_to_prostate: false
+  rf_as_bmode: false
+  include_rf: false
+  val_center: ${val_center}
+
+model:
+  name: unetr_generic
+  backbone_cfg:
+    name: dinov3_backbone_wrapper_for_feature_maps_list
+    backbone_cfg:
+      name: dinov3_vitl16 #dinov3_backbone_from_checkpoint
+      # config_path: /data/scratch/users/obed/dinov3_ssl/1818/config.yaml #/home/obed/scratch/1471034/config.yaml
+      # checkpoint_path: /data/scratch/users/obed/dinov3_ssl/1818/eval/training_49999/teacher_checkpoint.pth #/home/obed/scratch/1471034/eval/training_37499/teacher_checkpoint.pth
+      pretrained: true
+  embedding_size: 1024
+  backbone_out_format: bchw
+  input_size: 512
+  output_size: 512
+  interaction_indices:
+  - 4
+  - 11
+  - 17
+  - 23
+
+loss: mil_prop_bce_entropy_reg
+pos_weight: 8.0
+treat_gg1_as_benign: false
+outside_prostate_penalty: false
+add_image_clf: false
+image_clf_mode: null
+add_image_clf_high_vs_low_grade: false
+optimizer: adamw
+lr: 1.0e-05
+encoder_lr: 1.0e-05
+warmup_lr: 0.0001
+cnn_lr: 1.0e-05
+warmup_epochs: 0
+wd: 0.01
+accumulate_grad_steps: 1
+cutoff_epoch: null
+run_test: false
+test_every_epoch: false
+run_val: true
+seed: 30
+tracked_metric: auc
+save_checkpoint_wandb: false
+torch_compile: true
+use_amp: false
+device: cuda
+model_checkpoint: null
+debug: false
+save_best_weights: false
+checkpoint_dir: ${base_dir}/guideUS/${run_name}/ckpt
+
+evaluator:
+  log_images: false
+  log_images_every: 100
+
+wandb:
+  project: meta-learning-ttt
+  name: ${run_name}
+
