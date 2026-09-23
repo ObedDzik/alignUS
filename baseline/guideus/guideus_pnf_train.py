@@ -85,7 +85,7 @@ from medAI.modeling import *
 from medAI.utils.argparse import UpdateDictAction
 from medAI.utils.reproducibility import (get_all_rng_states,set_all_rng_states,set_global_seed,)
 from medAI.utils.accumulators import DataFrameCollector
-from baseline.guideus.src.loss_new import build_loss
+from losses import build_guidepnf_loss as build_loss
 from medAI.layers.masked_prediction_module import MaskedPredictionModule
 from src.loaders import check_grade_distribution #get_dataloaders
 

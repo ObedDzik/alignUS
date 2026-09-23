@@ -1,18 +1,229 @@
+"""
+losses.py — every loss function used in this repo, in one place.
+
+There are two independent loss-construction entry points, for two
+independent training scripts that never share loss code with each
+other:
+
+  - build_alignus_loss(args)  — used by train_patched.py (the core
+    AlignUS method, and its acmil/aem/microsegnet baseline variants,
+    which are train_patched.py runs with different flags).
+  - build_guidepnf_loss(args) — used by
+    baseline/guideus/guideus_pnf_train.py (the guideus and pnf
+    baselines, distinguished by cfg.experiment_type).
+
+This file was consolidated from three previously separate files
+(clean_loss.py, baseline/guideus/src/loss_new.py, vanilla_supcon.py)
+after a real bug made clear that having two near-identically-shaped
+files (each defining a TripletLoss, a SumLoss, and a build_loss) living
+in different directories was a design smell, not just an accident: the
+wrong one got wired into guideus_pnf_train.py's `from ... import
+build_loss` not once but twice, in two different directions, because
+nothing about the two files' names or locations made it obvious which
+script owned which. Names that collided between the two original files
+are now prefixed by which entry point owns them (AlignUS* / GuidePNF*);
+names that were identical in both (SumLoss, get_parser) are shared.
+"""
+
 from __future__ import annotations
+
 import argparse
-import json
-from typing import Callable
+import logging
+import random
+from collections import deque
+from typing import Callable, Dict, Optional, Union
+
 import torch
 from torch import nn
 from torch.nn import functional as F
 from einops import repeat, rearrange
-import logging
-import random
-from collections import defaultdict, deque
-import math
-from typing import Dict, Optional, Union
+
 from src.baseline_attention_reg import AttentionEntropyMaximization
-from vanilla_supcon import VanillaSupConLoss as Vsupcon
+
+
+# =============================================================================
+# Shared utilities — identical in both original files, kept as one copy
+# =============================================================================
+
+def get_parser():
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--loss", default="needle_region_ce")
+    parser.add_argument(
+        "--outside_prostate_penalty",
+        action="store_true",
+        default=False,
+        help="Whether to penalize the model for making predictions outside the prostate region.",
+    )
+    return parser
+
+
+class SumLoss(nn.Module):
+    def __init__(self, losses, weights=None, names=None, log_every=10, normalize=False):
+        super().__init__()
+        self.losses = nn.ModuleList(losses)
+        self.weights = weights if weights is not None else [1.0] * len(losses)
+        self.names = names if names is not None else [f'loss_{i}' for i in range(len(losses))]
+        self.log_every = log_every
+        self.normalize = normalize
+        self._step = 0
+        self._loss_scale = None  # set on first forward pass
+
+    def set_epoch(self, epoch: int):
+        """Propagate epoch to any child loss that needs it."""
+        for loss_fn in self.losses:
+            if hasattr(loss_fn, 'set_epoch'):
+                loss_fn.set_epoch(epoch)
+
+    def forward(self, data):
+        total_loss = None
+        individual_losses = {}
+
+        raw_losses = {}
+        for loss_fn, name in zip(self.losses, self.names):
+            raw_losses[name] = loss_fn(data)
+
+        # on first step, record initial magnitudes as scale factors
+        if self.normalize and self._loss_scale is None:
+            self._loss_scale = {
+                name: max(raw_losses[name].item(), 1e-8)
+                for name in self.names
+            }
+            logging.info(f"Loss scales initialized: { {k: f'{v:.4f}' for k, v in self._loss_scale.items()} }")
+
+        for name, raw, weight in zip(self.names, raw_losses.values(), self.weights):
+            scale = self._loss_scale[name] if (self.normalize and self._loss_scale) else 1.0
+            component = (raw / scale) * weight
+            individual_losses[name] = raw.item()  # log raw for interpretability
+            total_loss = component if total_loss is None else total_loss + component
+
+        individual_losses['total'] = total_loss.item()
+        data['_loss_components'] = individual_losses
+
+        if self._step % self.log_every == 0:
+            loss_str = " | ".join(f"{name}={val:.4f}" for name, val in individual_losses.items())
+            logging.info(f"[step {self._step}] {loss_str}")
+
+        self._step += 1
+        return total_loss
+
+
+# =============================================================================
+# AlignUS core-method losses (train_patched.py) — from clean_loss.py
+# =============================================================================
+
+def _supcon(embeddings: torch.Tensor, labels: torch.Tensor, temperature: float) -> torch.Tensor:
+    """Standard SupCon (L_out form) over one batch. Embeddings must be L2-normalized."""
+    n = embeddings.size(0)
+    device = embeddings.device
+    labels = labels.view(-1).to(device)
+
+    sim = torch.matmul(embeddings, embeddings.t()) / temperature
+
+    off_diag = ~torch.eye(n, dtype=torch.bool, device=device)
+    pos_mask = (labels.unsqueeze(0) == labels.unsqueeze(1)) & off_diag
+
+    if pos_mask.sum() == 0:
+        return embeddings.sum() * 0.0
+
+    sim_stable = sim - sim.max(dim=1, keepdim=True).values.detach()
+    exp_sim = torch.exp(sim_stable)
+    denom = (exp_sim * off_diag.float()).sum(dim=1, keepdim=True) + 1e-8
+
+    log_prob = sim_stable - torch.log(denom)
+    pos_count = pos_mask.sum(dim=1).clamp(min=1).float()
+    return -((log_prob * pos_mask.float()).sum(dim=1) / pos_count).mean()
+
+
+class VanillaSupConLoss(nn.Module):
+    """
+    Two-term plain SupCon, mirroring the term structure of WithinModalSupConLossv2
+    so the comparison is on the objective rather than on which terms exist:
+
+        within : SupCon over the current batch of US embeddings
+        cross  : SupCon over the concatenated US + histo batch
+
+    Set lambda_cross=0 for US-only rows — ProstNFoundMeta zeroes positive_hist in
+    us_only mode, and the cross term would silently run on all-zero embeddings
+    rather than raising.
+
+    No memory bank, unlike WithinModalSupConLossv2, so it differs from that class
+    in two ways at once (weighting AND bank). If the weighting needs to be
+    isolated on its own, that is the neg_strength=0 / domain_boost=0 run of
+    WithinModalSupConLossv2, not this one.
+    """
+
+    def __init__(
+        self,
+        temperature: float = 0.07,
+        lambda_within: float = 1.0,
+        lambda_cross: float = 1.0,
+        log_every: int = 100,
+    ):
+        super().__init__()
+        self.temperature = max(float(temperature), 1e-6)
+        self.lambda_within = float(lambda_within)
+        self.lambda_cross = float(lambda_cross)
+        self.log_every = int(log_every)
+        self._num_computed = 0
+        self._num_skipped = 0
+
+    def forward(self, data: dict) -> torch.Tensor:
+        hist_key = (
+            "joint_positive_hist"
+            if data.get("joint_positive_hist") is not None
+            else "positive_hist"
+        )
+
+        required = ["image_feats_needle", "grade_group"]
+        if self.lambda_cross != 0:
+            required.append(hist_key)
+        missing = [k for k in required if k not in data or data[k] is None]
+        if missing:
+            self._num_skipped += 1
+            logging.warning(
+                f"[VanillaSupConLoss] skipped (total={self._num_skipped}). "
+                f"Missing keys: {missing}"
+            )
+            ref = next(v for v in data.values() if isinstance(v, torch.Tensor))
+            return torch.tensor(0.0, device=ref.device, requires_grad=True)
+
+        device = data["image_feats_needle"].device
+        us = F.normalize(data["image_feats_needle"], dim=1)          # (B, D)
+        labels = data["grade_group"].view(-1).to(device)             # (B,)
+
+        # --- Term 1: within-US ---
+        within_loss = _supcon(us, labels, self.temperature)
+
+        # --- Term 2: cross-modal, US and histo in one batch ---
+        cross_loss = torch.tensor(0.0, device=device)
+        if self.lambda_cross != 0:
+            histo = F.normalize(data[hist_key].to(device), dim=1)    # (B, D)
+            embeds = torch.cat([us, histo], dim=0)                   # (2B, D)
+            cross_labels = torch.cat([labels, labels], dim=0)        # (2B,)
+            cross_loss = _supcon(embeds, cross_labels, self.temperature)
+
+        loss = self.lambda_within * within_loss + self.lambda_cross * cross_loss
+
+        self._num_computed += 1
+        if self.log_every and self._num_computed % self.log_every == 0:
+            self._log(us, labels, within_loss, cross_loss, loss)
+        return loss
+
+    @torch.no_grad()
+    def _log(self, us, labels, within_loss, cross_loss, total):
+        sim = us @ us.t()
+        n = us.size(0)
+        off = ~torch.eye(n, dtype=torch.bool, device=us.device)
+        pos = (labels.unsqueeze(0) == labels.unsqueeze(1)) & off
+        neg = (~(labels.unsqueeze(0) == labels.unsqueeze(1))) & off
+        pos_sim = (sim * pos.float()).sum() / pos.float().sum().clamp(min=1)
+        neg_sim = (sim * neg.float()).sum() / neg.float().sum().clamp(min=1)
+        logging.info(
+            f"[VanillaSupCon] step={self._num_computed} | "
+            f"within={within_loss.item():.4f} | cross={cross_loss.item():.4f} | "
+            f"total={total.item():.4f} | pos_sim={pos_sim.item():.4f} | "
+            f"neg_sim={neg_sim.item():.4f} | gap={(pos_sim - neg_sim).item():.4f}"
+        )
 
 
 class NeedleProportionBCE(nn.Module):
@@ -75,7 +286,6 @@ class NeedleProportionBCE(nn.Module):
             if mask.sum() > 0:
                 grade_mean_scores[grade] = patch_logits[mask].sigmoid().mean(dim=1).mean()
         data["grade_mean_cancer_scores"] = grade_mean_scores
-        # grade_weights = {0: 1.0, 1: 1.0, 2: 1.0, 3: 1.0, 4: 0.1, 5: 0.1}
         grade_weights = {0: 1.0, 1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0, 5: 1.0}
         loss = torch.tensor(0.0, device=device)
         for i in range(B):
@@ -95,7 +305,13 @@ class NeedleProportionBCE(nn.Module):
         return loss / B
 
 
-class TripletLoss(nn.Module):
+class AlignUSTripletLoss(nn.Module):
+    """Triplet loss used by the core AlignUS method's cfg_triplet ablation.
+
+    Note there is a *different* TripletLoss used by the guideus/pnf
+    baselines (GuidePNFTripletLoss, below) — this one adds mining-quality
+    diagnostics (adjacent-grade rate, gap distribution) the other doesn't.
+    """
     def __init__(self, margin=1.0, p=2, mode='hist'):
         """
         mode: 'hist' → reads from positive_hist/negative_hist (all modes except joint)
@@ -162,7 +378,7 @@ class TripletLoss(nn.Module):
                 if v[1] > 0
             }
             logging.info(
-                f"[TripletLoss:{self.mode}] Adjacent rate: {rate:.2%} | "
+                f"[AlignUSTripletLoss:{self.mode}] Adjacent rate: {rate:.2%} | "
                 f"Avg grade gap: {avg_gap:.2f} | "
                 f"Gap dist: { {g: self.anchor_neg_gap.count(g) for g in sorted(set(self.anchor_neg_gap))} } | "
                 f"Per-grade rates: {per_grade_rates}"
@@ -176,7 +392,7 @@ class TripletLoss(nn.Module):
 
         if missing:
             self.num_skipped += 1
-            logging.warning(f"[TripletLoss:{self.mode}] Skipped (count={self.num_skipped}). Missing: {missing}")
+            logging.warning(f"[AlignUSTripletLoss:{self.mode}] Skipped (count={self.num_skipped}). Missing: {missing}")
             return torch.tensor(0.0, device=next(iter(data.values())).device, requires_grad=True)
 
         self.num_computed += 1
@@ -338,56 +554,6 @@ class TripletLossUS(nn.Module):
         return self.criterion(anchors, positives, negatives)
 
 
-class SumLoss(nn.Module):
-    def __init__(self, losses, weights=None, names=None, log_every=10, normalize=False):
-        super().__init__()
-        self.losses = nn.ModuleList(losses)
-        self.weights = weights if weights is not None else [1.0] * len(losses)
-        self.names = names if names is not None else [f'loss_{i}' for i in range(len(losses))]
-        self.log_every = log_every
-        self.normalize = normalize
-        self._step = 0
-        self._loss_scale = None  # set on first forward pass
-
-    def set_epoch(self, epoch: int):
-        """Propagate epoch to any child loss that needs it."""
-        for loss_fn in self.losses:
-            if hasattr(loss_fn, 'set_epoch'):
-                loss_fn.set_epoch(epoch)
-
-    def forward(self, data):
-        total_loss = None
-        individual_losses = {}
-
-        raw_losses = {}
-        for loss_fn, name in zip(self.losses, self.names):
-            raw_losses[name] = loss_fn(data)
-
-        # on first step, record initial magnitudes as scale factors
-        if self.normalize and self._loss_scale is None:
-            self._loss_scale = {
-                name: max(raw_losses[name].item(), 1e-8) 
-                for name in self.names
-            }
-            logging.info(f"Loss scales initialized: { {k: f'{v:.4f}' for k, v in self._loss_scale.items()} }")
-
-        for name, raw, weight in zip(self.names, raw_losses.values(), self.weights):
-            scale = self._loss_scale[name] if (self.normalize and self._loss_scale) else 1.0
-            component = (raw / scale) * weight
-            individual_losses[name] = raw.item()  # log raw for interpretability
-            total_loss = component if total_loss is None else total_loss + component
-
-        individual_losses['total'] = total_loss.item()
-        data['_loss_components'] = individual_losses
-
-        if self._step % self.log_every == 0:
-            loss_str = " | ".join(f"{name}={val:.4f}" for name, val in individual_losses.items())
-            logging.info(f"[step {self._step}] {loss_str}")
-
-        self._step += 1
-        return total_loss
-
-
 class ISUPLoss(nn.Module):
     def __init__(
         self,
@@ -433,10 +599,12 @@ class ISUPLoss(nn.Module):
         )
         return loss
 
+
 class LossScaleNormalizer:
     def __init__(self, momentum=0.99):
         self.momentum = momentum
         self._scale = None
+
     def normalize(self, loss: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
             current = loss.item()
@@ -444,7 +612,7 @@ class LossScaleNormalizer:
                 self._scale = current
             else:
                 self._scale = (
-                    self.momentum * self._scale 
+                    self.momentum * self._scale
                     + (1 - self.momentum) * current
                 )
         return loss / (self._scale + 1e-8)
@@ -580,8 +748,6 @@ class OrdinalNegWeightedSupConLossv2(nn.Module):
         # ------------------------------------------------------------------ #
         # Denominator: positives (weight=1) + weighted negatives              #
         # ------------------------------------------------------------------ #
-        # pos_mask entries get weight 1.0, neg_mask entries get w_neg,
-        # diagonal entries get 0.0 (excluded).
         denom_weights = pos_mask.float() + w_neg                            # (N, N)
         sim_stable = sim - sim.max(dim=1, keepdim=True).values.detach()
         exp_sim    = torch.exp(sim_stable)                                  # (N, N)
@@ -592,10 +758,6 @@ class OrdinalNegWeightedSupConLossv2(nn.Module):
 
         return loss_per_anchor.mean()
 
-
-# ---------------------------------------------------------------------------
-# Outer loss: within-US + cross-modal, with memory banks
-# ---------------------------------------------------------------------------
 
 class WithinModalSupConLossv2(nn.Module):
     """
@@ -621,7 +783,6 @@ class WithinModalSupConLossv2(nn.Module):
         neg_strength:   Scale of ordinal negative boost (default 1.0)
         domain_boost:   Additive weight on cross-domain negatives in Term 2 (default 0.5)
         lambda_cross:   Weight of cross-modal term relative to within-US (default 0.5)
-        lambda_cross:   Weight of cross-modal term relative to corss-modal (default 0.5)
         bank_size:      Max embeddings stored per grade per modality (default 128)
         grade_sequence: List of raw ISUP grade values present in data
         within_bank_n:  Bank samples per grade for within-US batch (default 16)
@@ -634,19 +795,18 @@ class WithinModalSupConLossv2(nn.Module):
         temperature: float = 0.07,
         neg_strength: float = 1.0,
         domain_boost: float = 0.5,
-        lambda_cross: float = 1, #0.5,
+        lambda_cross: float = 1,
         lambda_within: float = 1,
         bank_size: int = 128,
-        grade_sequence: list = [0, 1, 2, 3, 4, 5], #TODO
-        # grade_sequence: list = [0, 1, 2],
+        grade_sequence: list = [0, 1, 2, 3, 4, 5],
         within_bank_n: int = 16,
         cross_bank_n: int = 16,
         momentum: float = 0.0,
-        lambda_mri = 0.5,
-        lambda_mmd = 0.0,
+        lambda_mri=0.5,
+        lambda_mmd=0.0,
         predictor: Optional[nn.Module] = None,  # JEPAPredictor instance, owned externally
-        use_predictor_for_cross: bool = False, 
-        use_mmd = False,
+        use_predictor_for_cross: bool = False,
+        use_mmd=False,
     ):
         super().__init__()
         self.lambda_cross   = lambda_cross
@@ -664,7 +824,6 @@ class WithinModalSupConLossv2(nn.Module):
         self.use_mmd = use_mmd
         self.predictor = predictor
         self.use_predictor_for_cross = use_predictor_for_cross
-
 
         self._num_skipped  = 0
         self._num_computed = 0
@@ -850,7 +1009,6 @@ class WithinModalSupConLossv2(nn.Module):
             else:
                 self.mri_bank[lbl].append(mri_e_cpu)
 
-
     def _build_cross_modal_batch_mri(
         self,
         us_embeds: torch.Tensor,
@@ -973,8 +1131,6 @@ class WithinModalSupConLossv2(nn.Module):
 
             # ------------------------------------------------------------------ #
             # Term 2: cross-modal SupCon — operates on z_cross      #
-            # z_cross is in translated histo space so SupCon operates on         #
-            # geometrically compatible embeddings from both modalities            #
             # ------------------------------------------------------------------ #
             cross_embeds, cross_labels, cross_domains = self._build_cross_modal_batch(
                 z_cross, histo_embeds, labels_list, device
@@ -1042,8 +1198,8 @@ class WithinModalSupConLossv2(nn.Module):
             return loss
 
 
-
-def build_loss(args):
+def build_alignus_loss(args):
+    """Used by train_patched.py only (core AlignUS method + acmil/aem/microsegnet)."""
     losses  = []
     weights = []
     names   = []
@@ -1054,7 +1210,7 @@ def build_loss(args):
         names.append('isuploss')
 
     elif args.loss_type == 'vsupcon':
-        losses.append(Vsupcon())
+        losses.append(VanillaSupConLoss())
         weights.append(1.0)
         names.append('vsupcon')
 
@@ -1101,7 +1257,7 @@ def build_loss(args):
             names.append('tripletus')
 
         elif args.train_mode == 'us_histo':
-            losses.append(TripletLoss(margin=5.0, p=2, mode='hist'))
+            losses.append(AlignUSTripletLoss(margin=5.0, p=2, mode='hist'))
             weights.append(1.0)
             names.append('triplet_hist')
 
@@ -1117,15 +1273,374 @@ def build_loss(args):
 
     return SumLoss(losses, weights, names, normalize=args.normalize)
 
-def get_parser():
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--loss", default="needle_region_ce")
-    parser.add_argument(
-        "--outside_prostate_penalty",
-        action="store_true",
-        default=False,
-        help="Whether to penalize the model for making predictions outside the prostate region.",
-    )
-    return parser
+
+# =============================================================================
+# GuidePNF baseline losses (guideus_pnf_train.py: guideus + pnf) — from loss_new.py
+# =============================================================================
+
+class GuidePNFTripletLoss(nn.Module):
+    """Triplet loss used by the guideus baseline (experiment_type='guideus').
+
+    Simpler than AlignUSTripletLoss (above) — no mining diagnostics, reads
+    straight from positive_hist/negative_hist. Not used at all for
+    experiment_type='pnf' (see build_guidepnf_loss).
+    """
+    def __init__(self, margin=1.0, p=2):
+        super().__init__()
+        self.criterion = nn.TripletMarginLoss(margin=margin, p=p)
+
+    def forward(self, data):
+        if "cancer_logits" not in data or "negative_hist" not in data or "positive_hist" not in data:
+            print("Returning 0.0")
+            return torch.tensor(0.0, device=data["label"].device)
+        embed_us = data["image_feats_needle"]
+        X_pos = data["positive_hist"].to('cuda')
+        X_neg = data["negative_hist"].to('cuda')
+        loss = self.criterion(embed_us, X_pos, X_neg)
+        return loss
 
 
+class SupervisedContrastiveCrossModal(nn.Module):
+    def __init__(self, temperature=0.07, normalize=True, safe_float=True):
+        super().__init__()
+        self.tau = temperature
+        self.normalize = normalize
+        self.safe_float = safe_float  # upcast logits to float32 for stability if needed
+
+    def forward(self, data):
+        z1 = data["image_feats_needle"]        # [B, D]  (anchor; usually CUDA)
+        z2 = data["positive_hist"]             # [B, D]  (may be CPU)
+        y  = data["grade_group"]                   # [B]
+
+        # unify device & dtype to the anchor
+        device, dtype = z1.device, z1.dtype
+        z2 = z2.to(device=device, dtype=dtype, non_blocking=True)
+        y  = y.to(device=device, non_blocking=True)
+
+        if self.normalize:
+            z1 = F.normalize(z1, dim=1)
+            z2 = F.normalize(z2, dim=1)
+
+        Z = torch.cat([z1, z2], dim=0)         # [2B, D]
+
+        # compute similarities; upcast for numerical stability if using mixed precision
+        logits = (Z @ Z.t())
+        if self.safe_float and logits.dtype != torch.float32:
+            logits = logits.float()
+        logits = logits / self.tau             # [2B, 2B]
+
+        # mask self-contrast
+        n = logits.size(0)
+        eye = torch.eye(n, device=device, dtype=torch.bool)
+        # use finfo min instead of -inf to avoid AMP edge cases
+        neg_inf = torch.finfo(logits.dtype).min
+        logits = logits.masked_fill(eye, neg_inf)
+
+        labels = torch.cat([y, y], dim=0)      # [2B]
+        pos_mask = labels.unsqueeze(0).eq(labels.unsqueeze(1)) & (~eye)
+
+        # log-softmax over rows
+        log_prob = logits - logits.logsumexp(dim=1, keepdim=True)
+
+        # average over positives per anchor (skip anchors with zero positives)
+        denom = pos_mask.sum(dim=1).clamp_min(1)
+        loss = -(pos_mask * log_prob).sum(dim=1) / denom
+        return loss.mean()
+
+
+class SymmetricInfoNCELoss(nn.Module):
+    def __init__(self, temperature=0.07):
+        super().__init__()
+        self.tau = temperature
+
+    def forward(self, data):
+        us = data["image_feats_needle"]
+        hist = data["positive_hist"]
+
+        # unify device & dtype to the anchor (US) tensor
+        device = us.device
+        dtype = us.dtype
+        hist = hist.to(device=device, dtype=dtype, non_blocking=True)
+
+        logits_us_to_hist = (us @ hist.t()) / self.tau
+        logits_hist_to_us = (hist @ us.t()) / self.tau
+
+        targets = torch.arange(us.size(0), device=device)
+        loss_us = F.cross_entropy(logits_us_to_hist, targets)
+        loss_hist = F.cross_entropy(logits_hist_to_us, targets)
+        return 0.5 * (loss_us + loss_hist)
+
+
+class _GuidePNFMaskedPredictionModule(nn.Module):
+    """Computes the patch and core predictions and labels within the valid
+    loss region for a heatmap. Local to the guidepnf loss classes below —
+    distinct from medAI.layers.masked_prediction_module.MaskedPredictionModule,
+    which guideus_pnf_train.py uses separately for its own pooling."""
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, heatmap_logits, mask):
+        """Computes the patch and core predictions and labels within the valid loss region."""
+        B, C, H, W = heatmap_logits.shape
+
+        assert mask.shape == (
+            B,
+            1,
+            H,
+            W,
+        ), f"Expected mask shape to be {(B, 1, H, W)}, got {mask.shape} instead."
+
+        core_idx = torch.arange(B, device=heatmap_logits.device)
+        core_idx = repeat(core_idx, "b -> b h w", h=H, w=W)
+
+        core_idx_flattened = rearrange(core_idx, "b h w -> (b h w)")
+        mask_flattened = rearrange(mask, "b c h w -> (b h w) c")[..., 0]
+        logits_flattened = rearrange(heatmap_logits, "b c h w -> (b h w) c", h=H, w=W)
+
+        logits = logits_flattened[mask_flattened]
+        core_idx = core_idx_flattened[mask_flattened]
+
+        patch_logits = logits
+
+        return patch_logits, core_idx
+
+
+class CancerDetectionValidRegionLoss(nn.Module):
+    def __init__(
+        self,
+        base_loss: Callable = F.binary_cross_entropy_with_logits,
+        prostate_mask: bool = True,
+        needle_mask: bool = True,
+    ):
+        super().__init__()
+        self.base_loss = base_loss
+        self.prostate_mask = prostate_mask
+        self.needle_mask = needle_mask
+
+    def forward(self, data: dict):
+        cancer_logits = data["cancer_logits"]
+        label = data["label"].to(cancer_logits.device)
+        prostate_mask = data["prostate_mask"].to(cancer_logits.device)
+        needle_mask = data["needle_mask"].to(cancer_logits.device)
+
+        masks = []
+        for i in range(len(cancer_logits)):
+            mask = torch.ones(
+                prostate_mask[i].shape, device=prostate_mask[i].device
+            ).bool()
+            if self.prostate_mask:
+                mask &= prostate_mask[i] > 0.5
+            if self.needle_mask:
+                mask &= needle_mask[i] > 0.5
+            masks.append(mask)
+        masks = torch.stack(masks)
+        predictions, batch_idx = _GuidePNFMaskedPredictionModule()(cancer_logits, masks)
+        labels = torch.zeros(len(predictions), device=predictions.device)
+        for i in range(len(predictions)):
+            labels[i] = label[batch_idx[i]]
+        labels = labels[..., None]  # needs to match N, C shape of preds
+
+        return self.base_loss(predictions, labels)
+
+
+class ProportionBCE(nn.Module):
+    def __init__(
+        self,
+        l1_penalty_lambda: float | None = None,
+        entropy_penalty_lambda: float | None = None,
+    ):
+        super().__init__()
+        self.l1_penalty_lambda = l1_penalty_lambda
+        self.entropy_penalty_lambda = entropy_penalty_lambda
+
+    def forward(self, bag_of_logits, true_prop):
+        probs = bag_of_logits.sigmoid()
+        pred_prob = probs.mean()
+
+        loss = -true_prop * pred_prob.log() - (1 - true_prop) * (1 - pred_prob).log()
+
+        if self.l1_penalty_lambda:
+            loss = loss + self.l1_penalty_lambda * probs.abs().sum()
+        if self.entropy_penalty_lambda:
+            entropy = -probs * probs.log() - (1 - probs) * (1 - probs).log()
+            loss = loss + self.entropy_penalty_lambda * entropy.mean()
+
+        return loss
+
+
+class CancerDetectionMILLoss(nn.Module):
+    def __init__(self, base_loss=None, treat_gg1_as_benign=False):
+        super().__init__()
+        self.base_loss = base_loss if base_loss is not None else ProportionBCE()
+        self.treat_gg1_as_benign = treat_gg1_as_benign
+
+    def forward(self, data):
+        cancer_logits = data["cancer_logits"]
+        batch_size = len(cancer_logits)
+        prostate_mask = data["prostate_mask"].to(cancer_logits.device)
+        needle_mask = data["needle_mask"].to(cancer_logits.device)
+        involvement = data["involvement"].to(cancer_logits.device)
+        grade_group = data["grade_group"].to(cancer_logits.device)
+
+        if self.treat_gg1_as_benign:
+            involvement[grade_group == 1] = 0.0
+
+        masks = []
+        for i in range(len(cancer_logits)):
+            mask = torch.ones(
+                prostate_mask[i].shape, device=prostate_mask[i].device
+            ).bool()
+            mask &= prostate_mask[i] > 0.5
+            mask &= needle_mask[i] > 0.5
+            masks.append(mask)
+        masks = torch.stack(masks)
+        predictions, batch_idx = _GuidePNFMaskedPredictionModule()(cancer_logits, masks)
+
+        loss = torch.tensor(0, device=cancer_logits.device)
+        for i in range(batch_size):
+            bag_i = predictions[batch_idx == i]
+            involvement_i = involvement[i]
+
+            loss = loss + self.base_loss(bag_i, involvement_i)
+
+        return loss
+
+
+class InvolvementL1Loss(nn.Module):
+    def __init__(self, prostate_penalty=True, pos_weight=1):
+        super().__init__()
+        self.prostate_penalty = prostate_penalty
+        self.pos_weight = pos_weight
+
+    def __call__(self, data):
+        avg_needle_heatmap_value = data["average_needle_heatmap_value"]
+        B = len(avg_needle_heatmap_value)
+        device = avg_needle_heatmap_value.device
+        avg_prostate_heatmap_value = data["average_prostate_heatmap_value"]
+        involvement = data["involvement"].to(device)
+        cores_positive_for_patient = data["cores_positive_for_patient"]
+
+        loss = torch.tensor(0, device=device)
+        loss = loss + torch.nn.functional.l1_loss(
+            avg_needle_heatmap_value, involvement, reduction="none"
+        )
+        for idx in range(B):
+            if involvement[idx] > 0:
+                loss[idx] *= self.pos_weight
+        loss = loss.mean()
+
+        if self.prostate_penalty:
+            for idx in range(B):
+                if cores_positive_for_patient[idx] == 0:
+                    loss += avg_prostate_heatmap_value[idx]
+
+        return loss
+
+
+class InvolvementMSELoss(nn.Module):
+    def __call__(self, data):
+        avg_needle_heatmap_value = data["average_needle_heatmap_value"]
+        B = len(avg_needle_heatmap_value)
+        device = avg_needle_heatmap_value.device
+        involvement = data["involvement"].to(device)
+
+        loss = torch.nn.functional.mse_loss(avg_needle_heatmap_value, involvement)
+        return loss
+
+
+class ImageLevelClassificationLoss(nn.Module):
+    def __init__(self, mode):
+        super().__init__()
+        self.mode = mode
+
+    def forward(self, data):
+        """
+        Computes the image-level classification loss.
+        """
+        if "image_level_classification_outputs" not in data:
+            return torch.tensor(0.0, device=data["label"].device)
+
+        logits = data["image_level_classification_outputs"][0]
+
+        if self.mode == "pca":
+            labels = data["label"].to(logits.device)
+        else:
+            labels = (data["grade_group"] > 2).long().to(logits.device)
+
+        loss = F.cross_entropy(logits, labels)
+
+        return loss
+
+
+class OutsideProstatePenaltyLoss(nn.Module):
+
+    def forward(self, data: dict):
+        cancer_logits = data["cancer_logits"]
+        prostate_mask = data["prostate_mask"].to(cancer_logits.device)
+
+        masks = []
+        for i in range(len(cancer_logits)):
+            mask = torch.ones(
+                prostate_mask[i].shape, device=prostate_mask[i].device
+            ).bool()
+            mask &= prostate_mask[i] < 0.5
+            masks.append(mask)
+
+        masks = torch.stack(masks)
+        predictions, batch_idx = _GuidePNFMaskedPredictionModule()(cancer_logits, masks)
+
+        loss = torch.nn.L1Loss()(predictions, torch.zeros_like(predictions))
+
+        return loss
+
+
+def build_heatmap_loss(args):
+    if args.loss == "needle_region_ce":
+        return CancerDetectionValidRegionLoss()
+    elif args.loss == "inv_l1":
+        return InvolvementL1Loss()
+    elif args.loss == "inv_l1_v2":
+        return InvolvementL1Loss(prostate_penalty=False)
+    elif args.loss == "inv_mse":
+        return InvolvementMSELoss()
+    elif args.loss == "mil_prop_bce":
+        return CancerDetectionMILLoss()
+    elif args.loss == "mil_prop_bce_l1_reg":
+        return CancerDetectionMILLoss(
+            base_loss=ProportionBCE(0.001), treat_gg1_as_benign=args.treat_gg1_as_benign
+        )
+    elif args.loss == "mil_prop_bce_entropy_reg":
+        return CancerDetectionMILLoss(
+            base_loss=ProportionBCE(entropy_penalty_lambda=0.01),
+            treat_gg1_as_benign=args.get('treat_gg1_as_benign', False),
+        )
+    elif args.loss == "none":
+        return None
+    else:
+        raise ValueError(f"Unknown loss function: {args.loss}")
+
+
+def build_guidepnf_loss(args):
+    """Used by baseline/guideus/guideus_pnf_train.py only (guideus + pnf,
+    distinguished by args.experiment_type)."""
+    losses = []
+    weights = []
+    names = []
+    hmap_loss = build_heatmap_loss(args)
+
+    if args.experiment_type != 'pnf':
+        losses.append(GuidePNFTripletLoss(margin=1.0, p=2))
+        names.append('triplet')
+        weights.append(1)
+
+    if hmap_loss is not None:
+        losses.append(hmap_loss)
+        weights.append(1)
+        names.append('hmap')
+
+    if args.add_image_clf:
+        print(f"Adding image-level classification loss: {args.add_image_clf}")
+        losses.append(ImageLevelClassificationLoss(mode=args.image_clf_mode))
+
+    return SumLoss(losses, weights, names)

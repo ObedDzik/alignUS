@@ -7,9 +7,11 @@ the core method itself, distinguished purely by config.
 
 ## guideus and pnf — share `baseline/guideus/guideus_pnf_train.py`
 
-Note this script uses its own loss module, `src/loss_new.py`
-(`build_loss`) — **not** `clean_loss.py`, which is only ever used by the
-core method's `train_patched.py`.
+Note this script's loss comes from `losses.py::build_guidepnf_loss` —
+**not** `build_alignus_loss`, which is only ever used by the core
+method's `train_patched.py`. Both entry points live in the same file
+but never share a class or a config with each other; see `losses.py`'s
+own docstring.
 
 - **guideus**: `experiment_type: guideus` (adds a triplet alignment term
   on top of the heatmap loss) —
@@ -31,7 +33,7 @@ not separate scripts.
 
 Both regularizers are implemented in `src/baseline_attention_reg.py`
 (`ACMILHead`, `AttentionEntropyMaximization`) and wired into
-`clean_loss.py::build_loss`.
+`losses.py::build_alignus_loss`.
 
 ## microsegnet — Table 1's MicroSegNet-FT, also via `train_patched.py`
 

@@ -58,8 +58,8 @@ L = L_align + λ_sg · L_sg
 ```
 
 This is implemented as `WithinModalSupConLossv2` (`L_align`) +
-`NeedleProportionBCE` (`L_sg`) in `clean_loss.py`, trained by
-`train_patched.py`.
+`NeedleProportionBCE` (`L_sg`) — see `losses.py::build_alignus_loss` —
+trained by `train_patched.py`.
 
 ## Results
 
@@ -107,11 +107,15 @@ entropy / patch-feature dispersion), and discussion are in the paper.
 ```
 alignUS/
 ├── train_patched.py    — training script (backbone-agnostic: dino / medsam / microsegnet)
-├── clean_loss.py        — L_align (WithinModalSupConLossv2), L_sg
-│                          (NeedleProportionBCE), plus the AEM/ACMIL
-│                          regularizer hooks used by two of the baselines
-├── vanilla_supcon.py, diagnostics.py, extract_embeddings.py,
-│   make_figures.py, plot_diagnostics.py, plot_embeddings.py
+├── losses.py             — every loss function in the repo, in one file.
+│                          build_alignus_loss (L_align, L_sg, the AEM/ACMIL
+│                          regularizer hooks — train_patched.py only) and
+│                          build_guidepnf_loss (guideus/pnf only) are
+│                          independent entry points that never share a
+│                          config or a class with each other — see the
+│                          file's own docstring
+├── diagnostics.py, extract_embeddings.py, make_figures.py,
+│   plot_diagnostics.py, plot_embeddings.py
 ├── src/                 — self-contained project dependencies (dataset
 │                          classes, ABMIL pooling, DINOv3 loading, the
 │                          AEM loss component, the MicroSegNet/TransUnet
