@@ -3,15 +3,15 @@ weight: 0.2_H_0.8_M
 pr_train_mode: us_histo
 train_mode: ${pr_train_mode}
 run_name: pnf_${fold}
-base_dir: /scratch/obed
+base_dir: ${oc.env:CHECKPOINT}
 chkpt_dir: /${oc.env:JOB_ID} #dummy
 model_type: medsam
 experiment_type: pnf
 
-histo_emb_dir: /project/6106383/shared/radboud_gigaembeds
-mri_emb_dir: /home/obed/projects/aip-medilab/shared/mri_only_embeddings_dino
-hist_csv: /project/aip-medilab/shared/metadata_usalign/clean_labels_with_cancer_pct.csv
-mri_csv: /project/aip-medilab/shared/picai/manifests/slices_manifest.csv
+histo_emb_dir: ${oc.env:HISTO_EMB_DIR}
+mri_emb_dir: ${oc.env:MRI_EMB_DIR}
+hist_csv: ${oc.env:HIST_CSV}
+mri_csv: ${oc.env:MRI_CSV}
 freeze_encoder: False
 restrict_test: False
 
@@ -47,8 +47,8 @@ test_save_best_weights: True
 
 data:
   dataset: nct              # anything other than "optimum" uses BModeDatasetV2
-  root_dir_c23: /datasets/exactvu_pca/OPTIMUM/processed/UA_annotated_needles   # NeedleTrace root for train/val
-  root_dir_c3: /datasets/exactvu_pca/OPTIMUM/UA_OL_PU_annotated_needles_multiframe
+  root_dir_c23: ${oc.env:EXACTVU_PCA_DATA_ROOT}/OPTIMUM/processed/UA_annotated_needles   # NeedleTrace root for train/val
+  root_dir_c3: ${oc.env:EXACTVU_PCA_DATA_ROOT}/OPTIMUM/UA_OL_PU_annotated_needles_multiframe
   fold: ${fold}
   optimum_center: OL
   n_folds: 5
@@ -112,7 +112,7 @@ save_checkpoint_wandb: false
 torch_compile: true
 use_amp: true
 device: cuda
-checkpoint_dir: ${base_dir}/alignUS_propbce/${run_name}/${chkpt_dir} 
+checkpoint_dir: ${base_dir}/alignUS/${run_name}/${chkpt_dir} 
 model_checkpoint: null
 debug: false
 save_best_weights: True
@@ -123,6 +123,6 @@ evaluator:
 
 wandb:
   run_name: ${run_name}
-  project: alignUS_propbce
+  project: alignUS
   group: ${run_name}
 job_id: 0

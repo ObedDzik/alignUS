@@ -22,14 +22,17 @@
 
 set -euo pipefail
 
-# ----- environment (must match the training sbatch) -----
-export MEDSAM_CHECKPOINT_DIR=/datasets/exactvu_pca/checkpoint_store
-export MEDSAM_CHECKPOINT=/datasets/exactvu_pca/checkpoint_store/sam/medsam_vit_b_cpu.pth
-export NCT_RAW_DATA_DIR=/datasets/exactvu_pca/nct2013
-export NCT_METADATA_PATH=/datasets/exactvu_pca/nct2013/metadata.csv
-export DINOV3_LIBRARY_PATH=/home/obed/projects/aip-medilab/obed/medproj/dinov3
-export EXACTVU_PCA_DATA_ROOT=/datasets/exactvu_pca
-export DINOV3_CHECKPOINTS_PATH=/datasets/exactvu_pca/checkpoint_store/dinov3
+# ----- environment -----
+# Copy .env.example to .env and fill in your own paths/credentials first
+# (see README.md's Data section for what each one should contain).
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ ! -f "$REPO_ROOT/.env" ]; then
+  echo "Missing $REPO_ROOT/.env -- copy .env.example to .env and fill in your paths." >&2
+  exit 1
+fi
+set -a
+source "$REPO_ROOT/.env"
+set +a
 
 # ----- project imports -----
 # extract_embeddings.py imports the training module by dotted path; medAI is
@@ -52,7 +55,6 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "PROJECT_ROOT : ${PROJECT_ROOT}"
-echo "MEDAI_ROOT   : ${MEDAI_ROOT}"
 echo "args         : $*"
 echo
 

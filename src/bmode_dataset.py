@@ -215,7 +215,7 @@ class BModeDatasetV2(Dataset):
         self.metadata = self.metadata[self.metadata.core_id.isin(core_ids)]
         self._indices = []
         self.core_ids = core_ids
-        self.df= pd.read_csv("/project/aip-medilab/shared/metadata_usalign/metadata.csv")
+        self.df = pd.read_csv(os.path.join(os.environ["USALIGN_METADATA_DIR"], "metadata.csv"))
         for i, core_id in enumerate(tqdm(self.core_ids, desc="Loading dataset")):
             if frames == "first":
                 self._indices.append((i, 0))
@@ -378,10 +378,10 @@ class BModeDatasetV3(Dataset):
         self.frames          = frames
         self.output_fmt      = output_fmt
 
-        self.df= pd.read_csv("/project/aip-medilab/shared/metadata_usalign/metadata.csv")
-        self.train_df=pd.read_csv("/project/aip-medilab/shared/metadata_usalign/panda_split/train.csv")
-        self.hist_df=pd.read_csv("/project/aip-medilab/shared/metadata_usalign/clean_labels_with_cancer_pct.csv")
-        self.mri_df = pd.read_csv("/project/aip-medilab/shared/picai/manifests/slices_manifest.csv")
+        self.df = pd.read_csv(os.path.join(os.environ["USALIGN_METADATA_DIR"], "metadata.csv"))
+        self.train_df = pd.read_csv(os.path.join(os.environ["USALIGN_METADATA_DIR"], "panda_split", "train.csv"))
+        self.hist_df = pd.read_csv(os.environ["HIST_CSV"])
+        self.mri_df = pd.read_csv(os.environ["MRI_CSV"])
 
         # Karolinska histo only
         self.hist_df = self.hist_df[self.hist_df["data_provider"] == "karolinska"]

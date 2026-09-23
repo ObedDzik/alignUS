@@ -238,10 +238,10 @@ class BModeDatasetV2(Dataset):
         self.flip_ud = flip_ud
         self.frames = frames
         self.output_fmt = output_fmt
-        self.df= pd.read_csv("/project/aip-medilab/shared/metadata_usalign/metadata.csv")
-        self.train_df=pd.read_csv("/project/aip-medilab/shared/metadata_usalign/panda_split/train.csv")
-        self.hist_df=pd.read_csv("/project/aip-medilab/shared/metadata_usalign/clean_labels_with_cancer_pct.csv")
-        self.mri_df = pd.read_csv("/project/aip-medilab/shared/picai/manifests/slices_manifest.csv")
+        self.df = pd.read_csv(os.path.join(os.environ["USALIGN_METADATA_DIR"], "metadata.csv"))
+        self.train_df = pd.read_csv(os.path.join(os.environ["USALIGN_METADATA_DIR"], "panda_split", "train.csv"))
+        self.hist_df = pd.read_csv(os.environ["HIST_CSV"])
+        self.mri_df = pd.read_csv(os.environ["MRI_CSV"])
 
         # train_image_ids = set(self.hist_df['image_id'])
         # self.hist_df = self.hist_df[self.hist_df['image_id'].isin(train_image_ids)] 
@@ -285,7 +285,6 @@ class BModeDatasetV2(Dataset):
         
         self.hist_root = histo_emb_dir
         # self.hist_root='/home/tarek909/projects/aip-medilab/shared/picai/histopathology_encodings/UNI2/panda_train_emd_scl/512'
-        # self.mri_root = '/home/obed/projects/aip-medilab/shared/mri_histo_align_embeddings_medsam'
         self.mri_root = mri_emb_dir
 
     def __len__(self):
@@ -593,10 +592,10 @@ class BModeDatasetV3(Dataset):
         self.frames          = frames
         self.output_fmt      = output_fmt
 
-        self.df= pd.read_csv("/project/aip-medilab/shared/metadata_usalign/metadata.csv")
-        self.train_df=pd.read_csv("/project/aip-medilab/shared/metadata_usalign/panda_split/train.csv")
-        self.hist_df=pd.read_csv("/project/aip-medilab/shared/metadata_usalign/clean_labels_with_cancer_pct.csv")
-        self.mri_df = pd.read_csv("/project/aip-medilab/shared/picai/manifests/slices_manifest.csv")
+        self.df = pd.read_csv(os.path.join(os.environ["USALIGN_METADATA_DIR"], "metadata.csv"))
+        self.train_df = pd.read_csv(os.path.join(os.environ["USALIGN_METADATA_DIR"], "panda_split", "train.csv"))
+        self.hist_df = pd.read_csv(os.environ["HIST_CSV"])
+        self.mri_df = pd.read_csv(os.environ["MRI_CSV"])
 
         # Karolinska histo only
         self.hist_df = self.hist_df[self.hist_df["data_provider"] == "karolinska"]

@@ -130,6 +130,11 @@ alignUS/
 │                          ablation, Table 2's bottom two rows)
 ├── baseline/             — comparison methods from Table 1/2, see
 │                          baseline/README.md
+├── data_schema/           — example JSON showing the per-core metadata
+│                          format the dataset loaders expect (no real
+│                          data — see the Data section below)
+├── .env.example           — every path/credential this repo needs; copy
+│                          to .env and fill in your own (gitignored)
 ├── train.sh / debug.sh / extract_embeddings.sh
 └── figures/, runs/       — plots and cached prediction/embedding outputs
 ```
@@ -148,10 +153,62 @@ python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-`train.sh`/`debug.sh` expect `WANDB_API_KEY` to already be set in your
-environment (never commit a real key to these scripts) and assume a
-SLURM cluster with `module load python/3.12 cuda/12.2 opencv/4.12.0` —
-drop those lines if you're not on one.
+`train.sh`/`debug.sh`/`extract_embeddings.sh` all require a `.env` file
+(copy `.env.example` → `.env` and fill in your own paths — every path
+this repo needs, checkpoints and data alike, is read from there; nothing
+is hardcoded in the scripts or cfgs). They also assume a SLURM cluster
+with `module load python/3.12 cuda/12.2 opencv/4.12.0` and a
+`#SBATCH --account=...` allocation — drop/change those lines if that
+doesn't match your setup.
+
+## Data
+
+This repo doesn't ship any data — the underlying cohorts (NCT2013 and
+OPTIMUM micro-ultrasound, PANDA histopathology, PI-CAI MRI) are private
+clinical datasets under data-use agreements, not something a `git clone`
+can include. What follows is the exact shape each `.env` path is read
+in, so the code is at least reproducible against equivalent data you
+have access to, or can be adapted with.
+
+- **`NCT_RAW_DATA_DIR` / `NCT_METADATA_PATH`** — the NCT2013 cohort.
+  `NCT_METADATA_PATH` is a CSV with one row per core; `NCT_RAW_DATA_DIR`
+  holds the corresponding raw B-mode frames, read via
+  `medAI.datasets.nct2013.data_access`.
+- **`EXACTVU_PCA_DATA_ROOT`** — the OPTIMUM cohort root. Two
+  subdirectories under it are used directly (see `root_dir_c23`/
+  `root_dir_c3` in the cfgs): `OPTIMUM/processed/UA_annotated_needles`
+  and `OPTIMUM/UA_OL_PU_annotated_needles_multiframe`. Each holds one
+  directory per core (named by `cine_id`, e.g. `UA-023-006/`), each
+  containing `frames/*.png` (the B-mode cine loop), one or more
+  `needle_mask*.png` (binary needle-trace masks), and an `info.json`
+  with that core's metadata — see
+  `data_schema/example_optimum_core_info.json` for the exact fields
+  (`cine_id`, `center`, `case`, `PRI-MUS`, `PI-RADS`, `Diagnosis`, `GG`,
+  `% Cancer`, `age`, `psa`, ...) that `src/bmode_dataset.py` and
+  `src/needle_trace_dataset_ttt.py` read from it.
+- **`HISTO_EMB_DIR` / `HIST_CSV`** — GigaPath histopathology (PANDA)
+  embeddings. `HISTO_EMB_DIR` holds one `.npz` file per slide, named
+  `<image_id>.npz`, with keys `embedding` (768-d), `image_id`,
+  `isup_grade`, `domain_label`. `HIST_CSV` is the metadata CSV linking
+  `image_id` → `data_provider`, `isup_grade`, `gleason_score`,
+  `cancer_percentage`.
+- **`MRI_EMB_DIR` / `MRI_CSV`** — MRI (PI-CAI) embeddings, only used by
+  a subset of ablations. `.npy` files named `<case_id>_<z>.npy`;
+  `MRI_CSV` is the corresponding slice manifest.
+- **`USALIGN_METADATA_DIR`** — directory holding `metadata.csv` (general
+  core metadata) and `panda_split/train.csv` (PANDA train/test split),
+  siblings of `HIST_CSV`, read directly by `src/bmode_dataset.py`.
+- **`MEDSAM_CHECKPOINT_DIR` / `MEDSAM_CHECKPOINT`** — a pretrained
+  MedSAM checkpoint (`medsam_vit_b_cpu.pth` or equivalent), for the
+  `medsam` backbone.
+- **`MICROSEGNET_CHECKPOINT`** — a pretrained MicroSegNet checkpoint,
+  for the `microsegnet` baseline only.
+- **`DINOV3_LIBRARY_PATH` / `DINOV3_CHECKPOINTS_PATH`** — a local clone
+  of [facebookresearch/dinov3](https://github.com/facebookresearch/dinov3)
+  (imported for its model-building code, not vendored here) and where
+  its pretrained checkpoints live, for the `dino` backbone.
+- **`CHECKPOINT`** — where this repo's own trained checkpoints get
+  written (`base_dir` in every cfg).
 
 ## Running
 

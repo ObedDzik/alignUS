@@ -3,18 +3,16 @@ weight: 0.2_H_0.8_M
 pr_train_mode: us_only
 train_mode: ${pr_train_mode}
 run_name: us_only_microseg_${fold}
-base_dir: /scratch/obed
+base_dir: ${oc.env:CHECKPOINT}
 chkpt_dir: /${oc.env:JOB_ID} #dummy
 model_type: microsegnet
-# histo_emb_dir: /home/obed/projects/aip-medilab/shared/mahdi_histo_uni_embeds
-histo_emb_dir: /project/6106383/shared/radboud_gigaembeds
-# histo_emb_dir: /home/obed/projects/aip-medilab/obed/medproj/medAI/projects/histopathology/karolinska_giga_embeddings
-mri_emb_dir: /home/obed/projects/aip-medilab/shared/mri_only_embeddings_dino
-hist_csv: /project/aip-medilab/shared/metadata_usalign/clean_labels_with_cancer_pct.csv
-mri_csv: /project/aip-medilab/shared/picai/manifests/slices_manifest.csv
+histo_emb_dir: ${oc.env:HISTO_EMB_DIR}
+mri_emb_dir: ${oc.env:MRI_EMB_DIR}
+hist_csv: ${oc.env:HIST_CSV}
+mri_csv: ${oc.env:MRI_CSV}
 freeze_encoder: False
 restrict_test: False
-microsegnet_checkpoint: /datasets/exactvu_pca/checkpoint_store/Paul/medAI/MicroSegNet.pth
+microsegnet_checkpoint: ${oc.env:MICROSEGNET_CHECKPOINT}
 
 use_acmil: False
 acmil_mask_drop_prob: 0.0
@@ -47,8 +45,8 @@ test_save_best_weights: True
 
 data:
   dataset: nct              # anything other than "optimum" uses BModeDatasetV2
-  root_dir_c23: /datasets/exactvu_pca/OPTIMUM/processed/UA_annotated_needles   # NeedleTrace root for train/val
-  root_dir_c3: /datasets/exactvu_pca/OPTIMUM/UA_OL_PU_annotated_needles_multiframe
+  root_dir_c23: ${oc.env:EXACTVU_PCA_DATA_ROOT}/OPTIMUM/processed/UA_annotated_needles   # NeedleTrace root for train/val
+  root_dir_c3: ${oc.env:EXACTVU_PCA_DATA_ROOT}/OPTIMUM/UA_OL_PU_annotated_needles_multiframe
   fold: ${fold}
   optimum_center: OL
   n_folds: 5
@@ -83,11 +81,9 @@ data:
 # model:
 #   name: unetr_generic
 #   backbone_cfg:
-#     name: dinov3_backbone_wrapper_for_feature_maps_list #/data/scratch/users/obed/1818/eval/training_49999/teacher_checkpoint.pth
+#     name: dinov3_backbone_wrapper_for_feature_maps_list
 #     backbone_cfg:
 #       name: dinov3_vitl16 #dinov3_backbone_from_checkpoint
-#       # config_path: /data/scratch/users/obed/dinov3_ssl/1818/config.yaml #/home/obed/scratch/1471034/config.yaml
-#       # checkpoint_path: /data/scratch/users/obed/dinov3_ssl/1818/eval/training_49999/teacher_checkpoint.pth #/home/obed/scratch/1471034/eval/training_37499/teacher_checkpoint.pth
 #       pretrained: true
 #   embedding_size: 1024
 #   backbone_out_format: bchw
@@ -127,8 +123,8 @@ save_checkpoint_wandb: false
 torch_compile: true
 use_amp: true
 device: cuda
-checkpoint_dir: ${base_dir}/alignUS_propbce/${run_name}/${chkpt_dir} #${base_dir}/${chkpt_dir}
-model_checkpoint: null #/home/obed/scratch/ggnus_align/nct_opt_3way_0.2M_0.5H_0/3691219/best.pth
+checkpoint_dir: ${base_dir}/alignUS/${run_name}/${chkpt_dir} #${base_dir}/${chkpt_dir}
+model_checkpoint: null
 debug: false
 save_best_weights: True
 evaluator:
@@ -137,7 +133,7 @@ evaluator:
 
 wandb:
   run_name: ${run_name}
-  project: alignUS_propbce
+  project: alignUS
   group: ${run_name}
 job_id: 0
 

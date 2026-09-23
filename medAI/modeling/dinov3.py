@@ -295,8 +295,6 @@ def dinov3_vitl16(**kwargs):
     REPO_DIR = DINOV3_LIBRARY_PATH
     weight_basename = "dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
 
-    # DINOV3_CHECKPOINTS_PATH='/datasets/exactvu_pca/checkpoint_store'
-    # REPO_DIR='/home/obed/projects/aip-medilab/obed/medproj/dinov3'
 
     weights = os.path.join(DINOV3_CHECKPOINTS_PATH, weight_basename)
     if not os.path.exists(weights):

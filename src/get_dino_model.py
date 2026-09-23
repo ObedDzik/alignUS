@@ -20,8 +20,6 @@ def dinov3_vitl16(**kwargs):
     import torch
     import os
     REPO_DIR = DINOV3_LIBRARY_PATH
-    # DINOV3_CHECKPOINTS_PATH='/datasets/exactvu_pca/checkpoint_store'
-    # REPO_DIR='/home/obed/projects/aip-medilab/obed/medproj/dinov3'
 
     weight_basename = "dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
     weights = os.path.join(DINOV3_CHECKPOINTS_PATH, weight_basename)

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --account=aip-medilab
+#SBATCH --account=aip-medilab  # cluster-specific SLURM allocation; change to your own
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:l40s:1
 #SBATCH --ntasks-per-node=1
@@ -10,16 +10,18 @@
 #SBATCH --job-name=alignus_f0
 #SBATCH --output=logs/%x-%A-%a.log
 
-export CHECKPOINT=/scratch/obed
+# ----- environment -----
+# Copy .env.example to .env and fill in your own paths/credentials first
+# (see README.md's Data section for what each one should contain).
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ ! -f "$REPO_ROOT/.env" ]; then
+  echo "Missing $REPO_ROOT/.env -- copy .env.example to .env and fill in your paths." >&2
+  exit 1
+fi
+set -a
+source "$REPO_ROOT/.env"
+set +a
 export JOB_ID=$SLURM_JOB_ID
-export MEDSAM_CHECKPOINT_DIR=/datasets/exactvu_pca/checkpoint_store
-export MEDSAM_CHECKPOINT=/datasets/exactvu_pca/checkpoint_store/sam/medsam_vit_b_cpu.pth
-export WANDB_API_KEY="${WANDB_API_KEY:?Set WANDB_API_KEY in your environment before running (never commit a real key here)}"
-export NCT_RAW_DATA_DIR=/datasets/exactvu_pca/nct2013
-export NCT_METADATA_PATH=/datasets/exactvu_pca/nct2013/metadata.csv
-export DINOV3_LIBRARY_PATH=/home/obed/projects/aip-medilab/obed/medproj/dinov3
-export EXACTVU_PCA_DATA_ROOT=/datasets/exactvu_pca
-export DINOV3_CHECKPOINTS_PATH=/datasets/exactvu_pca/checkpoint_store/dinov3
 export CUDA_LAUNCH_BLOCKING=1
 
 module load python/3.12 cuda/12.2  # cluster-specific; drop if you are not on this cluster

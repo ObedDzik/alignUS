@@ -2,10 +2,10 @@
 plot_diagnostics.py — mechanism figure and table from diag_*.csv, single fold.
 
     python plot_diagnostics.py --out figures/ \
-      --csv "ABMIL + ACMIL=/home/obed/scratch/alignUS_propbce/acmil_512_0/5018749/diagnostics/diag_acmil_512_0.csv" \
-      --csv "ABMIL + AEM=/home/obed/scratch/alignUS_propbce/aem_512_0/5018794/diagnostics/diag_aem_512_0.csv" \
-      --csv "GUIDE-US=/home/obed/scratch/alignUS_propbce/guideus_0/5013937/diagnostics/diag_guideus_0.csv" \
-      --csv "Ours=/home/obed/scratch/alignUS_propbce/alignUS_512_0/5017307/diagnostics/diag_alignUS_512_0.csv"
+      --csv "ABMIL + ACMIL=$CHECKPOINT/alignUS/acmil_512_0/<job_id>/diagnostics/diag_acmil_512_0.csv" \
+      --csv "ABMIL + AEM=$CHECKPOINT/alignUS/aem_512_0/<job_id>/diagnostics/diag_aem_512_0.csv" \
+      --csv "GUIDE-US=$CHECKPOINT/alignUS/guideus_0/<job_id>/diagnostics/diag_guideus_0.csv" \
+      --csv "Ours=$CHECKPOINT/alignUS/alignUS_512_0/<job_id>/diagnostics/diag_alignUS_512_0.csv"
 
 Order on the command line is the order in the legend and the table.
 

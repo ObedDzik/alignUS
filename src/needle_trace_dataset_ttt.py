@@ -159,7 +159,7 @@ class NeedleTraceImageFramesDataset(Dataset):
                 if cine_ids and cine_id_dir not in cine_ids:
                     continue
 
-                if self.root_dir == '/datasets/exactvu_pca/OPTIMUM/UA_OL_PU_annotated_needles_multiframe':
+                if self.root_dir.rstrip('/').endswith('UA_OL_PU_annotated_needles_multiframe'):
                     frames_path = os.path.join(cine_path, "frames")
                     image_path = os.path.join(frames_path,'0000.png' )
                 else:
