@@ -7,18 +7,17 @@ the core method itself, distinguished purely by config.
 
 ## guideus and pnf — share `baseline/guideus/guideus_pnf_train.py`
 
-- **guideus**: `experiment_type: guideus`, triplet loss —
+Note this script uses its own loss module, `src/loss_new.py`
+(`build_loss`) — **not** `clean_loss.py`, which is only ever used by the
+core method's `train_patched.py`.
+
+- **guideus**: `experiment_type: guideus` (adds a triplet alignment term
+  on top of the heatmap loss) —
   `python -m baseline.guideus.guideus_pnf_train -c baseline/guideus/guideus_cfg0.yaml`
-  (smoke-tested end-to-end, works).
-- **pnf**: `experiment_type: pnf`, plain cancer-detection loss, no
-  alignment term — `python -m baseline.guideus.guideus_pnf_train -c baseline/pnf/cfg/pnf_cfg0.yaml`.
-  **Currently broken**: `clean_loss.py::build_loss` has no branch for
-  `loss_type: cancer_det` (only `isuploss`/`vsupcon`/`mmd_supcon`/`triplet`),
-  so this crashes on the first training step. `pnf` isn't one of the
-  paper's five named baselines (DINO-FT, MicroSegNet-FT, MedSAM-FT,
-  ProstNFound+, GUIDE-US) — it looks like an internal no-alignment
-  sanity check — so this likely doesn't block anything, but don't assume
-  it runs.
+- **pnf**: `experiment_type: pnf` (heatmap loss only, no alignment term) —
+  `python -m baseline.guideus.guideus_pnf_train -c baseline/pnf/cfg/pnf_cfg0.yaml`
+
+Both smoke-tested end-to-end (full debug-capped forward+backward pass).
 
 ## acmil and aem — share the root `train_patched.py`
 
